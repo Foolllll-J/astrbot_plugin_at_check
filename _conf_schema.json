@@ -1,0 +1,13 @@
+{
+  "whitelist_groups": {
+    "type": "list",
+    "description": "白名单群聊",
+    "hint": "填写群号列表，例如 [123456, 654321]；留空表示所有群均启用。"
+  },
+  "record_expire_seconds": {
+    "type": "int",
+    "default": 86400,
+    "description": "记录保留时间（秒）",
+    "hint": "默认 86400 秒（1 天），小于等于 0 时按默认值处理。"
+  }
+}
