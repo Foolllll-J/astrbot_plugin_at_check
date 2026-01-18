@@ -1,6 +1,6 @@
 name: astrbot_plugin_at_check
 display_name: 谁艾特我
-desc: 记录群聊中最近@你的消息。
-version: v0.1
+desc: 记录群聊中最近@你的消息，支持单独@的上下文获取。
+version: v1.0
 author: Foolllll
 repo: https://github.com/Foolllll-J/astrbot_plugin_at_check

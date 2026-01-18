@@ -1,13 +1,36 @@
 {
-  "whitelist_groups": {
+  "group_whitelist": {
     "type": "list",
-    "description": "白名单群聊",
-    "hint": "填写群号列表，例如 [123456, 654321]；留空表示所有群均启用。"
+    "description": "群聊白名单",
+    "hint": "只有列表中的群组会记录 @ 消息。留空则全局启用。",
+    "default": []
   },
   "record_expire_seconds": {
     "type": "int",
     "default": 86400,
-    "description": "记录保留时间（秒）",
-    "hint": "默认 86400 秒（1 天），小于等于 0 时按默认值处理。"
+    "description": "记录保留时长（秒）",
+    "hint": "记录在数据库中保留的秒数。过期后将自动清理。默认 86400（1天）。"
+  },
+  "single_at_context_count": {
+    "description": "单独 @ 上下文条数",
+    "hint": "消息仅含 @ 时，额外记录发送者前后各 N 条消息。0 为不记录上下文。",
+    "type": "int",
+    "slider": {
+      "min": 0,
+      "max": 5,
+      "step": 1
+    },
+    "default": 0
+  },
+  "after_context_timeout": {
+    "description": "后续消息监控时长",
+    "hint": "消息仅含 @ 时，等待发送者补充后续消息的时长（秒）。建议 60-120。",
+    "type": "int",
+    "slider": {
+      "min": 0,
+      "max": 180,
+      "step": 5
+    },
+    "default": 60
   }
 }
