@@ -42,7 +42,8 @@
 | **`group_whitelist`** | `list` | `[]` | 启用记录的群号白名单。留空则全局启用。 |
 | **`record_expire_seconds`** | `int` | `86400` | 记录保留时长（秒）。过期记录自动清理。 |
 | **`single_at_context_count`** | `int` | `0` | 当有人“单独@”你时，尝试抓取该发送者前后的消息条数（最大 5）。 |
-| **`after_context_timeout`** | `int` | `60` | 单独@后，等待发送者补充后续消息的观察时间（秒）。 |
+| **`after_context_timeout`** | `int` | `60` | 单独@后，等待补充后续消息的观察时间（秒）。 |
+| **`context_sender_restricted`** | `bool` | `true` | 开启时，上下文仅捕获发起艾特者的消息；关闭时捕获群内所有人的消息。 |
 
 ---
 

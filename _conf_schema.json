@@ -32,5 +32,11 @@
       "step": 5
     },
     "default": 60
+  },
+  "context_sender_restricted": {
+    "description": "上下文限制发送者",
+    "hint": "开启时，上下文仅包含发起艾特的人的消息；关闭时，包含群内所有人的消息。",
+    "type": "bool",
+    "default": true
   }
 }

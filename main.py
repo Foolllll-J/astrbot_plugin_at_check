@@ -62,6 +62,7 @@ class AtRecorderNapcat(Star):
         self.max_records_per_query = 99
         self.single_at_context_count = int(self.config.get("single_at_context_count", 0) or 0)
         self.after_context_timeout = int(self.config.get("after_context_timeout", 60) or 0)
+        self.context_sender_restricted = self.config.get("context_sender_restricted", True)
 
         self._setup_database()
         groups = sorted(self.group_whitelist) if self.group_whitelist else []
@@ -223,7 +224,7 @@ class AtRecorderNapcat(Star):
                 return str(comp_id)
         return None
 
-    def _components_to_segments(self, components: List[Any]) -> List[Dict[str, Any]]:
+    async def _components_to_segments(self, components: List[Any], client=None, group_id: str = None) -> List[Dict[str, Any]]:
         segments: List[Dict[str, Any]] = []
         for comp in components:
             if self._is_reply_component(comp):
@@ -242,10 +243,21 @@ class AtRecorderNapcat(Star):
                 qq = getattr(comp, "qq", None)
                 if qq is None:
                     continue
+                
+                # 尝试获取 @ 目标的群昵称
+                at_name = None
+                if client and group_id:
+                    at_name = await self._get_group_nickname(client, group_id, str(qq))
+                
+                if at_name:
+                    display_text = f"@{at_name}"
+                else:
+                    display_text = f"@{qq}"
+
                 segments.append(
                     {
-                        "type": "at",
-                        "data": {"qq": str(qq)},
+                        "type": "text",
+                        "data": {"text": display_text},
                     }
                 )
                 segments.append(
@@ -342,7 +354,7 @@ class AtRecorderNapcat(Star):
                 continue
             sender = msg.get("sender", {}) or {}
             msg_sender_id = str(sender.get("user_id") or msg.get("user_id") or "")
-            if msg_sender_id != sender_id_str:
+            if self.context_sender_restricted and msg_sender_id != sender_id_str:
                 continue
 
             segs = msg.get("message") or []
@@ -409,6 +421,26 @@ class AtRecorderNapcat(Star):
         except Exception:
             return False
 
+    async def _get_group_nickname(self, client, group_id: str, user_id: str) -> Optional[str]:
+        """通过 API 获取群成员名片或昵称"""
+        try:
+            ret = await client.api.call_action(
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(user_id),
+                no_cache=False,
+            )
+            nickname = None
+            if isinstance(ret, dict):
+                data = ret.get("data") or ret
+                nickname = data.get("card") or data.get("nickname")
+            
+            logger.debug(f"[AtCheck] API 查询群昵称结果: group={group_id}, user={user_id}, result={nickname}")
+            return nickname
+        except Exception as e:
+            logger.error(f"[AtCheck] 获取群昵称失败 (API): {e}")
+            return None
+
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def record_at_message(self, event: AstrMessageEvent):
@@ -426,30 +458,24 @@ class AtRecorderNapcat(Star):
             now_ts = int(getattr(event.message_obj, "timestamp", int(time.time())))
             to_remove = []
             for key, watcher in list(self._single_at_watchers.items()):
+                # 超时仅清理内存
+                expire_ts = watcher.get("expire_ts", 0)
+                if expire_ts and now_ts > expire_ts:
+                    to_remove.append(key)
+                    logger.debug(f"[AtCheck] 上下文监控超时移除内存: group={watcher.get('group_id')}, at_mid={watcher.get('at_message_id')}")
+                    continue
+
                 if watcher.get("group_id") != group_id_str:
                     continue
-                if watcher.get("sender_id") != sender_id:
+                
+                # 根据配置项过滤发送者
+                if self.context_sender_restricted and watcher.get("sender_id") != sender_id:
                     continue
+                
                 start_ts = watcher.get("start_ts", 0)
                 if now_ts <= start_ts:
                     continue
-                expire_ts = watcher.get("expire_ts", 0)
-                if expire_ts and now_ts > expire_ts:
-                    context_ids = list(watcher.get("before_ids", []))
-                    at_mid = watcher.get("at_message_id")
-                    if at_mid:
-                        context_ids.append(str(at_mid))
-                    context_ids.extend(watcher.get("after_ids", []))
-                    if context_ids:
-                        await self.loop.run_in_executor(
-                            None,
-                            self._db_update_context_ids,
-                            watcher.get("group_id"),
-                            str(at_mid),
-                            context_ids,
-                        )
-                    to_remove.append(key)
-                    continue
+                
                 max_after = watcher.get("max_context", 0)
                 after_ids = watcher.get("after_ids", [])
                 if max_after and len(after_ids) >= max_after:
@@ -457,7 +483,8 @@ class AtRecorderNapcat(Star):
                 msg_id = getattr(event.message_obj, "message_id", None)
                 if msg_id is None:
                     continue
-
+                
+                # 过滤文件类消息...
                 components = getattr(event.message_obj, "message", None)
                 if isinstance(components, list):
                     file_like_keywords = ("video", "record", "file")
@@ -479,21 +506,27 @@ class AtRecorderNapcat(Star):
                     continue
                 after_ids.append(msg_id_str)
                 watcher["after_ids"] = after_ids
+                
+                # 立即更新数据库，确保实时性
+                context_ids = list(watcher.get("before_ids", []))
+                at_mid = watcher.get("at_message_id")
+                if at_mid:
+                    context_ids.append(str(at_mid))
+                context_ids.extend(after_ids)
+                
+                await self.loop.run_in_executor(
+                    None,
+                    self._db_update_context_ids,
+                    watcher.get("group_id"),
+                    str(at_mid),
+                    context_ids,
+                )
+                logger.debug(f"[AtCheck] 上下文监控即时更新数据库: group={watcher.get('group_id')}, at_mid={at_mid}, count={len(context_ids)}")
+
                 if max_after and len(after_ids) >= max_after:
-                    context_ids = list(watcher.get("before_ids", []))
-                    at_mid = watcher.get("at_message_id")
-                    if at_mid:
-                        context_ids.append(str(at_mid))
-                    context_ids.extend(after_ids)
-                    if context_ids:
-                        await self.loop.run_in_executor(
-                            None,
-                            self._db_update_context_ids,
-                            watcher.get("group_id"),
-                            str(at_mid),
-                            context_ids,
-                        )
                     to_remove.append(key)
+                    logger.debug(f"[AtCheck] 上下文监控满额移除内存: group={watcher.get('group_id')}, at_mid={at_mid}")
+            
             for key in to_remove:
                 self._single_at_watchers.pop(key, None)
 
@@ -549,7 +582,7 @@ class AtRecorderNapcat(Star):
 
         raw_message_data = None
         if has_reply_comp:
-            segments = self._components_to_segments(components_to_check)
+            segments = await self._components_to_segments(components_to_check, client, group_id_str)
             reply_id = self._extract_reply_id(components_to_check)
             if segments or reply_id:
                 payload = {
