@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Face, Image, Node, Nodes, Plain
+from astrbot.api.message_components import At, Face, Image, Node, Nodes, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 
 
@@ -308,12 +308,16 @@ class AtRecorderNapcat(Star):
             return False
         has_at = False
         for comp in components:
+            # 忽略引用组件
+            if isinstance(comp, Reply):
+                continue
             if isinstance(comp, At):
                 has_at = True
                 continue
             if isinstance(comp, Plain):
                 text = getattr(comp, "text", "")
                 s = text.strip()
+                # 移除常见标点和空白符
                 s = s.strip("，,。.!！?？~… 　\t\r\n")
                 if s:
                     return False
@@ -358,31 +362,45 @@ class AtRecorderNapcat(Star):
                 continue
 
             segs = msg.get("message") or []
-            if isinstance(segs, list):
-                file_like_types = {"video", "record", "file"}
-                has_file_like = False
-                for seg in segs:
+            file_like_types = {"video", "record", "file", "forward", "nodes", "node", "json", "xml"}
+            has_file_like = False
+            
+            # 统一转为列表处理
+            check_segs = segs if isinstance(segs, list) else [segs] if isinstance(segs, dict) else []
+            
+            if check_segs:
+                for seg in check_segs:
                     if not isinstance(seg, dict):
                         continue
-                    seg_type = seg.get("type")
-                    if not isinstance(seg_type, str):
-                        continue
-                    if seg_type.lower() in file_like_types:
+                    seg_type = str(seg.get("type") or "").lower()
+                    if seg_type in file_like_types:
                         has_file_like = True
                         break
-                if has_file_like:
-                    continue
+            elif isinstance(segs, str):
+                # 处理字符串形式的 CQ 码
+                segs_lower = segs.lower()
+                for t in file_like_types:
+                    if f"cq:{t}" in segs_lower:
+                        has_file_like = True
+                        break
+            
+            if has_file_like:
+                continue
 
             msg_time = msg.get("time")
             try:
                 msg_time_int = int(msg_time)
             except (TypeError, ValueError):
                 msg_time_int = at_timestamp - (total - idx)
+            
+            # 必须是早于当前艾特的消息
             if msg_time_int >= at_timestamp:
                 continue
+                
             msg_id = msg.get("message_id")
             if msg_id is None:
                 continue
+            
             candidates.append((msg_time_int, str(msg_id)))
         if not candidates:
             return []
@@ -454,6 +472,14 @@ class AtRecorderNapcat(Star):
         sender_id = str(event.get_sender_id())
         client = getattr(event, "bot", None)
 
+        # 1. 优先拦截查询指令，防止指令本身进入上下文或被记录为@
+        if re.fullmatch(r"^(谁艾特我|谁@我|谁@我了)[?？]?$", event.message_str):
+            logger.debug(
+                f"[AtCheck] 收到查询指令消息，不记录且不触发上下文，group_id={group_id_str}, sender_id={sender_id}"
+            )
+            return
+
+        # 2. 上下文监控逻辑
         if self.single_at_context_count > 0 and self._single_at_watchers:
             now_ts = int(getattr(event.message_obj, "timestamp", int(time.time())))
             to_remove = []
@@ -484,26 +510,25 @@ class AtRecorderNapcat(Star):
                 if msg_id is None:
                     continue
                 
-                # 过滤文件类消息...
+                # 过滤文件类及复杂卡片消息
                 components = getattr(event.message_obj, "message", None)
                 if isinstance(components, list):
-                    file_like_keywords = ("video", "record", "file")
+                    file_like_keywords = ("video", "record", "file", "forward", "nodes", "node", "json", "xml")
                     has_file_like = False
                     for comp in components:
                         name = comp.__class__.__name__.lower()
-                        if any(k in name for k in file_like_keywords):
-                            has_file_like = True
-                            break
-                        seg_type = getattr(comp, "type", None)
-                        if isinstance(seg_type, str) and seg_type.lower() in file_like_keywords:
+                        seg_type = str(getattr(comp, "type", None) or "").lower()
+                        
+                        if any(k in name for k in file_like_keywords) or seg_type in file_like_keywords:
                             has_file_like = True
                             break
                     if has_file_like:
                         continue
-
+                
                 msg_id_str = str(msg_id)
                 if msg_id_str in after_ids:
                     continue
+                
                 after_ids.append(msg_id_str)
                 watcher["after_ids"] = after_ids
                 
@@ -530,17 +555,12 @@ class AtRecorderNapcat(Star):
             for key in to_remove:
                 self._single_at_watchers.pop(key, None)
 
+        # 3. 白名单检查
         if self.group_whitelist and group_id_str not in self.group_whitelist:
             return
 
-        if re.fullmatch(r"^(谁艾特我|谁@我|谁@我了)[?？]?$", event.message_str):
-            logger.debug(
-                f"[AtCheck] 收到查询指令消息，不记录为@记录，group_id={group_id_str}, sender_id={event.get_sender_id()}"
-            )
-            return
-
         logger.debug(
-            f"[AtCheck] 处理群消息记录@，group_id={group_id_str}, sender_id={event.get_sender_id()}, message_id={getattr(event.message_obj, 'message_id', None)}, message_str={event.message_str}"
+            f"[AtCheck] 处理群消息记录@，group_id={group_id_str}, sender_id={sender_id}, message_id={getattr(event.message_obj, 'message_id', None)}, message_str={event.message_str}"
         )
 
         await self.loop.run_in_executor(None, self._db_cleanup_records)
@@ -688,7 +708,7 @@ class AtRecorderNapcat(Star):
             return
 
         if not records:
-            logger.info(
+            logger.debug(
                 f"[AtCheck] 查询结果为空，group_id={group_id_str}, user_id={user_id}"
             )
             yield event.plain_result("在设定时间范围内在这个群里没有人@你哦")
